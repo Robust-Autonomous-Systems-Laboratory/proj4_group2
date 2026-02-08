@@ -2,4 +2,4 @@
 
 ##Data Collection Using Turtlebot 3
 
-![Controlling turtle bot](./media/controlling_turtlebot.mp4)
+![Controlling turtle bot](https://drive.google.com/file/d/1w8894PAhPiHxX0CNOtRNaqFdzJPt3LTD/view?usp=drive_link)
