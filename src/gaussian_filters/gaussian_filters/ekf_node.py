@@ -9,90 +9,82 @@ from math import cos, sin
 import numpy as np
 
 
+def wrap_angle(a: float) -> float:
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
 class GaussianEKF(Node):
+    """
+    EKF state: x = [px, py, theta, v, w]^T
+      px, py, theta  : robot pose in odom frame
+      v, w           : body forward velocity and yaw rate
+
+    Measurements:
+      z = [v_enc, w_enc, w_imu]^T
+
+    Measurement model:
+      h(x) = [v, w, w]^T
+    """
+
     def __init__(self):
         super().__init__("ekf_node")
 
-       
-    
-        self.r = 0.033   # wheel radius (m)
-        self.b = 0.160   # wheel separation (m)
+        
+        self.r = 0.033   
+        self.b = 0.160
 
         
-        # State: x = [v, w]^T
-        
-        self.x = np.zeros((4, 1), dtype=float)
-        self.P = np.eye(4, dtype=float) * 0.1
+        self.x = np.zeros((5, 1), dtype=float)
+        self.P = np.eye(5, dtype=float) * 0.1
 
-        # Process + measurement noise
+        # Process noise
+        # px, py, theta, v, w
+        self.Q = np.diag([0.01**2, 0.01**2, 0.02**2, 0.20**2, 0.30**2]).astype(float)
 
-        # Q: uncertainty in how v,w evolve between steps
-        self.Q = np.diag([0.05**2, 0.10**2]).astype(float)
-
+        # Measrment noise for [v_enc, w_enc, w_imu]
         self.R = np.diag([0.03**2, 0.08**2, 0.05**2]).astype(float)
 
-        # Measurement model: z = Hx + noise
-        # v_enc measures v
-        # w_enc measures w
-        # w_imu measures w
-        self.H = np.array([
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0],
-        ], dtype=float)
+        self.z = None
+        self.u = np.zeros((2, 1), dtype=float)
 
-        
-        # i tried to reat command as a direct inputs for v,w
-        self.F = np.eye(2, dtype=float)
-        
-        # Latest measurements
-        self.z = None              
-        self.u = np.zeros((2, 1))  
+        self.v_enc = 0.0
+        self.w_enc = 0.0
+        self.w_imu = 0.0
 
-        # Timing for filter + integration
+        # Timing
         self.last_time = None
 
-        # Pose (integrated from filtered v,w)
-        self.theta = 0.0
-        self.px = 0.0
-        self.py = 0.0
+        self.alpha_v = 8.0
+        self.alpha_w = 10.0
 
         
-        # Subsscriptions and a publisher
-
         self.create_subscription(JointState, "/joint_states", self.joint_callback, 10)
         self.create_subscription(Imu, "/imu", self.imu_callback, 10)
         self.create_subscription(TwistStamped, "/cmd_vel", self.cmd_callback, 10)
 
         self.odom_pub = self.create_publisher(Odometry, "/ekf_odom", 10)
 
-        self.timer = self.create_timer(0.02, self.kf_step)
+        
+        self.timer = self.create_timer(0.02, self.ekf_step)
 
-        # Cache encoder and imu values
-        self.v_enc = 0.0
-        self.w_enc = 0.0
-        self.w_imu = 0.0
-
-    
+   
     def joint_callback(self, msg: JointState):
 
-        #Using the joint names so that we dont assume what the index of left or right wheel are
-
+        # Use joint names (no index assumptions)
         names = ["wheel_left_joint", "wheel_right_joint"]
         try:
             wl_i = msg.name.index(names[0])
             wr_i = msg.name.index(names[1])
-
         except ValueError:
             return
 
-        wl = msg.velocity[wl_i]
-        wr = msg.velocity[wr_i]
+        wl = float(msg.velocity[wl_i])
+        wr = float(msg.velocity[wr_i])
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
 
-        
+        # z = [v_enc, w_enc, w_imu]
         self.z = np.array([[self.v_enc], [self.w_enc], [self.w_imu]], dtype=float)
 
     def imu_callback(self, msg: Imu):
@@ -105,98 +97,93 @@ class GaussianEKF(Node):
         w_cmd = float(msg.twist.angular.z)
         self.u = np.array([[v_cmd], [w_cmd]], dtype=float)
 
+    def f(self, x: np.ndarray, u: np.ndarray, dt: float) -> np.ndarray:
+        px, py, th, v, w = x.flatten()
+        v_cmd, w_cmd = u.flatten()
 
-    def func_x(self, dt):
+        px_new = px + v * dt * cos(th)
+        py_new = py + v * dt * sin(th)
+        th_new = wrap_angle(th + w * dt)
 
-        u = self.u.flatten()
-        x = self.x.flatten()
+        v_new = v + self.alpha_v * (v_cmd - v) * dt
+        w_new = w + self.alpha_w * (w_cmd - w) * dt
 
-        x_new = u[0]*dt*cos(x[2]) + x[0]
-        y_new = u[0]*dt*cos(x[2]) + x[1]
-        theta_new = x[2] + u[1]*dt
-        v_new = u[0]
-
-        return np.array([
-            [x_new],[y_new], [theta_new], [v_new]
-
-        ])
+        return np.array([[px_new], [py_new], [th_new], [v_new], [w_new]], dtype=float)
     
-    def jacobian_f(self,fx, dt, eps=1e-6):
 
-        n = self.x.shape[0]
-        F = np.zeros((n, n))
- 
-        for i in range(n):
-            dx = np.zeros_like(self.x)
-            dx[i, 0] = eps
-            F[:, i:i+1] = (self.func_x(self.x + dx, self.u, dt) - fx) / eps
+    def jacobian_f(self, x: np.ndarray, u: np.ndarray, dt: float) -> np.ndarray:
+        
+        #Analytic Jacobian F = df/dx for the f() above.
+    
+        _, _, th, v, w = x.flatten()
+
+        F = np.eye(5, dtype=float)
+
+        # d(px)/d(theta), d(px)/d(v)
+        F[0, 2] = -v * dt * sin(th)
+        F[0, 3] =  dt * cos(th)
+
+        # d(py)/d(theta), d(py)/d(v)
+        F[1, 2] =  v * dt * cos(th)
+        F[1, 3] =  dt * sin(th)
+
+        # d(theta)/d(w)
+        F[2, 4] = dt
+
+        # v' = v + alpha_v*(v_cmd - v)*dt => dv'/dv = 1 - alpha_v*dt
+        F[3, 3] = 1.0 - self.alpha_v * dt
+
+        # w' = w + alpha_w*(w_cmd - w)*dt => dw'/dw = 1 - alpha_w*dt
+        F[4, 4] = 1.0 - self.alpha_w * dt
 
         return F
-    
-    def numerical_jacobian_h(self, func_h, eps=1e-6):
-        z0 = func_h(self.x)
-        m = z0.shape[0]
-        n = self.x.shape[0]
 
-        H = np.zeros((m, n))
+    def h(self, x: np.ndarray) -> np.ndarray:
+       
+        v = float(x[3, 0])
+        w = float(x[4, 0])
+        return np.array([[v], [w], [w]], dtype=float)
 
-        for i in range(n):
-            dx = np.zeros_like(self.x)
-            dx[i, 0] = eps
-            H[:, i:i+1] = (func_h(self.x + dx) - z0) / eps
-
-        return H
-    
-    def h(x):
-        return x[0:2]
-    
-
-    def jacobian_h(self,x,eps=1e-6):
-
-        z0 = self.h(x)
-        m = z0.shape[0]
-        n = x.shape[0]
-
-        H = np.zeros((m, n))
-
-        for i in range(n):
-            dx = np.zeros_like(x)
-            dx[i, 0] = eps
-            H[:, i:i+1] = (self.h(x + dx) - z0) / eps
-
+    def jacobian_h(self, x: np.ndarray) -> np.ndarray:
+       
+        H = np.zeros((3, 5), dtype=float)
+        H[0, 3] = 1.0
+        H[1, 4] = 1.0  
+        H[2, 4] = 1.0 
         return H
 
-
-    def predict(self, dt): 
-
-        x_pred = self.func_x(dt)
-        self.F = self.jacobian_f(x_pred, dt)
-        P_pred = self.F @ self.P @ self.F.T + self.Q
+    
+    def predict(self, dt: float):
+        x_pred = self.f(self.x, self.u, dt)
+        F = self.jacobian_f(self.x, self.u, dt)
+        P_pred = F @ self.P @ F.T + self.Q
         return x_pred, P_pred
 
-    def update(self, x_pred, P_pred):
-
-        # x = x_pred + K y
-        # S = H P_pred H^T + R
-        # K = P_pred H^T S^-1
-        # P = (I - K H) P_pred
-        # y = z - H x_pred
-
-        z_pred = self.h(x_pred)
-        y = self.z - z_pred
-        S = self.H @ P_pred @ self.H.T + self.R
-        K = P_pred @ self.H.T @ np.linalg.inv(S)
-        self.x = x_pred + (K @ y)
-        I = np.eye(2, dtype=float)
-        self.P = (I - (K @ self.H)) @ P_pred
-
-   
-    def ekf_step(self):
-
+    def update(self, x_pred: np.ndarray, P_pred: np.ndarray):
+        
         if self.z is None:
             return
 
-        # dt
+        z_pred = self.h(x_pred)
+        H = self.jacobian_h(x_pred)
+
+        y = self.z - z_pred
+
+        S = H @ P_pred @ H.T + self.R
+        K = P_pred @ H.T @ np.linalg.inv(S)
+
+        self.x = x_pred + (K @ y)
+        self.x[2, 0] = wrap_angle(self.x[2, 0])
+
+        
+        I = np.eye(5, dtype=float)
+        self.P = (I - K @ H) @ P_pred @ (I - K @ H).T + K @ self.R @ K.T
+
+    
+    def ekf_step(self):
+        if self.z is None:
+            return
+
         t = self.get_clock().now().nanoseconds * 1e-9
         if self.last_time is None:
             self.last_time = t
@@ -204,28 +191,26 @@ class GaussianEKF(Node):
         dt = t - self.last_time
         self.last_time = t
 
-        
+        # EKF
         x_pred, P_pred = self.predict(dt)
         self.update(x_pred, P_pred)
 
-        v_f = float(self.x[0, 0])
-        w_f = float(self.x[1, 0])
+        # Publish odom from EKF pose and filtered v,w
+        px = float(self.x[0, 0])
+        py = float(self.x[1, 0])
+        v_f = float(self.x[3, 0])
+        w_f = float(self.x[4, 0])
 
-        # Integrate pose using filtered v,w
-        self.theta += w_f * dt
-        self.px += v_f * cos(self.theta) * dt
-        self.py += v_f * sin(self.theta) * dt
-
-        # Publish odom
         odom = Odometry()
         odom.header.stamp = self.get_clock().now().to_msg()
         odom.header.frame_id = "odom"
         odom.child_frame_id = "base_link"
 
-        odom.pose.pose.position.x = self.px
-        odom.pose.pose.position.y = self.py
+        odom.pose.pose.position.x = px
+        odom.pose.pose.position.y = py
         odom.pose.pose.position.z = 0.0
 
+    
         odom.twist.twist.linear.x = v_f
         odom.twist.twist.angular.z = w_f
 
