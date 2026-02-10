@@ -13,6 +13,13 @@ def wrap_angle(a: float) -> float:
     return (a + np.pi) % (2.0 * np.pi) - np.pi
 
 
+
+def to_quaternion(agnle: float):
+    qz = np.sin(agnle * 0.5)
+    qw = np.cos(agnle * 0.5)
+    return (0.0, 0.0, qz, qw)
+
+
 class GaussianEKF(Node):
     """
     EKF state: x = [px, py, theta, v, w]^T
@@ -198,6 +205,7 @@ class GaussianEKF(Node):
         # Publish odom from EKF pose and filtered v,w
         px = float(self.x[0, 0])
         py = float(self.x[1, 0])
+        theta = float(self.x[2, 0])
         v_f = float(self.x[3, 0])
         w_f = float(self.x[4, 0])
 
@@ -209,6 +217,17 @@ class GaussianEKF(Node):
         odom.pose.pose.position.x = px
         odom.pose.pose.position.y = py
         odom.pose.pose.position.z = 0.0
+
+        qx, qy, qz, qw = to_quaternion(theta)
+
+        odom.pose.pose.position.x = px
+        odom.pose.pose.position.y = py
+        odom.pose.pose.position.z = 0.0
+
+        odom.pose.pose.orientation.x = qx
+        odom.pose.pose.orientation.y = qy
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
 
     
         odom.twist.twist.linear.x = v_f

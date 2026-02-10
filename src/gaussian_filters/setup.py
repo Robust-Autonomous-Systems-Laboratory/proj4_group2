@@ -24,7 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'kf_node = gaussian_filters.kf_node:main'
+            'kf_node = gaussian_filters.kf_node:main',
+            'ekf_node = gaussian_filters.ekf_node:main',
+            'ukf_node = gaussian_filters.ukf_node:main',
         ],
     },
 )
