@@ -1,9 +1,9 @@
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import TwistStamped, PoseStamped
 from sensor_msgs.msg import JointState, Imu
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 
 from math import cos, sin
 import numpy as np
@@ -15,8 +15,11 @@ class GaussianKF(Node):
 
        
     
-        self.r = 0.033   # wheel radius (m)
-        self.b = 0.160   # wheel separation (m)
+        self.r = 0.033   # wheel radius
+        self.b = 0.160   # wheel separation
+
+        self.kf_path = Path()
+        self.kf_path.header.frame_id = "odom"
 
         
         # State: x = [v, w]^T
@@ -30,11 +33,6 @@ class GaussianKF(Node):
         self.Q = np.diag([0.05**2, 0.10**2]).astype(float)
 
         self.R = np.diag([0.03**2, 0.08**2, 0.05**2]).astype(float)
-
-        # Measurement model: z = Hx + noise
-        # v_enc measures v
-        # w_enc measures w
-        # w_imu measures w
         self.H = np.array([
             [1.0, 0.0],
             [0.0, 1.0],
@@ -42,7 +40,7 @@ class GaussianKF(Node):
         ], dtype=float)
 
         
-        # i tried to reat command as a direct inputs for v,w
+        # i tried to treat command as a direct inputs for v,w
         self.F = np.eye(2, dtype=float)
         self.B = np.eye(2, dtype=float)
 
@@ -60,12 +58,11 @@ class GaussianKF(Node):
 
         
         # Subsscriptions and a publisher
-
         self.create_subscription(JointState, "/joint_states", self.joint_callback, 10)
         self.create_subscription(Imu, "/imu", self.imu_callback, 10)
         self.create_subscription(TwistStamped, "/cmd_vel", self.cmd_callback, 10)
-
         self.odom_pub = self.create_publisher(Odometry, "/kf_odom", 10)
+        self.kf_path_pub = self.create_publisher(Path, "kf_path", 10)
 
         self.timer = self.create_timer(0.02, self.kf_step)
 
@@ -76,9 +73,6 @@ class GaussianKF(Node):
 
     
     def joint_callback(self, msg: JointState):
-
-        #Using the joint names so that we dont assume what the index of left or right wheel are
-
         names = ["wheel_left_joint", "wheel_right_joint"]
         try:
             wl_i = msg.name.index(names[0])
@@ -86,13 +80,12 @@ class GaussianKF(Node):
         except ValueError:
             return
 
-        wl = msg.velocity[wl_i]
-        wr = msg.velocity[wr_i]
+        wl = float(msg.velocity[wl_i])
+        wr = float(msg.velocity[wr_i])
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
 
-        
         self.z = np.array([[self.v_enc], [self.w_enc], [self.w_imu]], dtype=float)
 
     def imu_callback(self, msg: Imu):
@@ -107,9 +100,6 @@ class GaussianKF(Node):
 
 
     def predict(self):       
-        # x_pred = F x_k-1 + B u_k
-         # P_pred = F P_k-1 F^T + Q
-
         x_pred = self.F @ self.x + self.B @ self.u
         P_pred = self.F @ self.P @ self.F.T + self.Q
         return x_pred, P_pred
@@ -122,6 +112,11 @@ class GaussianKF(Node):
         # P = (I - K H) P_pred
         # y = z - H x_pred
 
+        if self.z is None:
+            self.x = x_pred
+            self.P = P_pred
+            return
+
 
         y = self.z - (self.H @ x_pred)
         S = self.H @ P_pred @ self.H.T + self.R
@@ -133,11 +128,10 @@ class GaussianKF(Node):
    
     def kf_step(self):
 
-        if self.z is None:
-            return
-
-        # dt
-        t = self.get_clock().now().nanoseconds * 1e-9
+        t_now = self.get_clock().now()
+        t = t_now.nanoseconds * 1e-9
+        current_time_msg = t_now.to_msg()
+       
         if self.last_time is None:
             self.last_time = t
             return
@@ -158,7 +152,7 @@ class GaussianKF(Node):
 
         # Publish odom
         odom = Odometry()
-        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.stamp = current_time_msg
         odom.header.frame_id = "odom"
         odom.child_frame_id = "base_link"
 
@@ -170,6 +164,19 @@ class GaussianKF(Node):
         odom.twist.twist.angular.z = w_f
 
         self.odom_pub.publish(odom)
+
+        pose = PoseStamped()
+        pose.header.stamp = current_time_msg
+        pose.header.frame_id = "odom"
+        pose.pose = odom.pose.pose
+        
+        self.kf_path.poses.append(pose)
+        self.kf_path.header.stamp = current_time_msg
+        self.kf_path_pub.publish(self.kf_path)
+
+
+
+
 
 
 def main():
