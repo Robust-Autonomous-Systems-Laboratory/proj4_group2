@@ -1,9 +1,9 @@
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import TwistStamped, PoseStamped
 from sensor_msgs.msg import JointState, Imu
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 
 from math import cos, sin
 import numpy as np
@@ -24,9 +24,12 @@ class GaussianUKF(Node):
     def __init__(self):
         super().__init__("ukf_node")
 
-        # Robot params (Turtlebot-ish)
         self.r = 0.033 
         self.b = 0.160
+
+
+        self.ukf_path = Path()
+        self.ukf_path.header.frame_id = "odom"
 
         
         self.x = np.zeros((5, 1), dtype=float)
@@ -55,6 +58,11 @@ class GaussianUKF(Node):
         self.beta = 2.0
         self.kappa = 0.0
 
+
+        self.last_wheel_pos = None
+        self.last_wheel_t = None
+
+
         self.lam = self.alpha**2 * (self.n + self.kappa) - self.n
         self.c = self.n + self.lam
 
@@ -70,13 +78,13 @@ class GaussianUKF(Node):
         self.create_subscription(TwistStamped, "/cmd_vel", self.cmd_callback, 10)
 
         self.odom_pub = self.create_publisher(Odometry, "/ukf_odom", 10)
+        self.ukf_path_pub = self.create_publisher(Path, "ukf_path", 10)
 
         self.timer = self.create_timer(0.02, self.ukf_step)
 
    
     def joint_callback(self, msg: JointState):
 
-        # Use joint names (no index assumptions)
         names = ["wheel_left_joint", "wheel_right_joint"]
         try:
             wl_i = msg.name.index(names[0])
@@ -84,19 +92,46 @@ class GaussianUKF(Node):
         except ValueError:
             return
 
-        wl = float(msg.velocity[wl_i])
-        wr = float(msg.velocity[wr_i])
+        t_now = self.get_clock().now().nanoseconds * 1e-9
+        wl_pos = float(msg.position[wl_i])
+        wr_pos = float(msg.position[wr_i])
+
+        if self.last_wheel_pos is None:
+            self.last_wheel_pos = (wl_pos, wr_pos)
+            self.last_wheel_t = t_now
+            return
+
+        dt = t_now - self.last_wheel_t
+        if dt <= 1e-6:
+            return
+
+        wl_prev, wr_prev = self.last_wheel_pos
+        wl = (wl_pos - wl_prev) / dt   # rad/s
+        wr = (wr_pos - wr_prev) / dt   # rad/s
+
+        self.last_wheel_pos = (wl_pos, wr_pos)
+        self.last_wheel_t = t_now
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
 
-       
-        self.z = np.array([[self.v_enc], [self.w_enc], [self.w_imu]], dtype=float)
+        self.w_enc = - self.w_enc
+
+        self.update_z_vector()
+
 
     def imu_callback(self, msg: Imu):
         self.w_imu = float(msg.angular_velocity.z)
         if self.z is not None:
-            self.z[2, 0] = self.w_imu
+             self.z[2, 0] = self.w_imu
+        self.update_z_vector()
+
+    def update_z_vector(self):
+        self.z = np.array([
+            [self.v_enc],
+            [self.w_enc],
+            [self.w_imu]
+        ], dtype=float)
 
     def cmd_callback(self, msg: TwistStamped):
         v_cmd = float(msg.twist.linear.x)
@@ -105,16 +140,6 @@ class GaussianUKF(Node):
 
     
     def f(self, x: np.ndarray, u: np.ndarray, dt: float) -> np.ndarray:
-
-        """
-        Motion model i decided to use the Forward kinematic Model as follows:
-          px'    = px + v*dt*cos(theta)
-          py'    = py + v*dt*sin(theta)
-          theta' = theta + w*dt
-          v'     = v + alpha_v*(v_cmd - v)*dt
-          w'     = w + alpha_w*(w_cmd - w)*dt
-        """
-
 
         px, py, th, v, w = x.flatten()
         v_cmd, w_cmd = u.flatten()
@@ -129,8 +154,6 @@ class GaussianUKF(Node):
         return np.array([px_new, py_new, th_new, v_new, w_new], dtype=float)
 
     def h(self, x: np.ndarray) -> np.ndarray:
-
-        
         v = float(x[3])
         w = float(x[4])
         return np.array([v, w, w], dtype=float)
@@ -138,13 +161,9 @@ class GaussianUKF(Node):
    
     def sigma_points(self, mu: np.ndarray, P: np.ndarray) -> np.ndarray:
 
-        #This part i had help its not all completely my code 
+        #This part i had help its not all completely my code
 
-        """
-        mu: (n,) mean
-        P:  (n,n) cov
-        return X: (2n+1, n)
-        """
+
         # numerical safety
         P = 0.5 * (P + P.T)
 
@@ -158,7 +177,6 @@ class GaussianUKF(Node):
             except np.linalg.LinAlgError:
                 jitter *= 10.0
         else:
-            # last resort: eigen fix
             eigvals, eigvecs = np.linalg.eigh(P)
             eigvals = np.clip(eigvals, 1e-12, None)
             P = eigvecs @ np.diag(eigvals) @ eigvecs.T
@@ -170,8 +188,6 @@ class GaussianUKF(Node):
             col = S[:, i]
             X[i + 1] = mu + col
             X[i + 1 + self.n] = mu - col
-
-        # sigma point angles should be wrapped
         X[:, 2] = np.vectorize(wrap_angle)(X[:, 2])
         return X
 
@@ -224,10 +240,9 @@ class GaussianUKF(Node):
         for i in range(Z.shape[0]):
             Z[i] = self.h(X_pred[i])
 
-        # predictd mesurement mean
+        
         z_hat = np.sum(self.Wm[:, None] * Z, axis=0)
-
-        # measurement covariance S
+        
         S = np.zeros((m, m), dtype=float)
         for i in range(Z.shape[0]):
             dz = (Z[i] - z_hat).reshape(-1, 1)
@@ -244,11 +259,7 @@ class GaussianUKF(Node):
 
         # Kalman gain
         K = Pxz @ np.linalg.inv(S)
-
-        # innovation
         y = (self.z.flatten() - z_hat).reshape(-1, 1)
-
-        # update
         mu_new = mu_pred.reshape(-1, 1) + K @ y
         mu_new[2, 0] = wrap_angle(mu_new[2, 0])
 
@@ -263,7 +274,11 @@ class GaussianUKF(Node):
         if self.z is None:
             return
 
-        t = self.get_clock().now().nanoseconds * 1e-9
+        t_now = self.get_clock().now()
+        t = t_now.nanoseconds * 1e-9
+        current_time_msg = t_now.to_msg()
+
+
         if self.last_time is None:
             self.last_time = t
             return
@@ -274,7 +289,7 @@ class GaussianUKF(Node):
         X_pred, mu_pred, P_pred = self.ukf_predict(dt)
         self.ukf_update(X_pred, mu_pred, P_pred)
 
-        # Publish odom from UKF pose and filtered v,w
+        
         px = float(self.x[0, 0])
         py = float(self.x[1, 0])
         theta = float(self.x[2, 0])
@@ -282,9 +297,9 @@ class GaussianUKF(Node):
         w_f = float(self.x[4, 0])
 
         odom = Odometry()
-        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.stamp = current_time_msg
         odom.header.frame_id = "odom"
-        odom.child_frame_id = "base_link"
+        odom.child_frame_id = "base_footprint"
 
         odom.pose.pose.position.x = px
         odom.pose.pose.position.y = py
@@ -305,8 +320,26 @@ class GaussianUKF(Node):
         
         odom.twist.twist.linear.x = v_f
         odom.twist.twist.angular.z = w_f
-
         self.odom_pub.publish(odom)
+
+
+
+        pose = PoseStamped()
+        pose.header.stamp = current_time_msg
+        pose.header.frame_id = "odom"
+        pose.pose.position.x = px
+        pose.pose.position.y = py
+        pose.pose.position.z = 0.0
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        
+        self.ukf_path.poses.append(pose)
+        self.ukf_path.header.stamp = current_time_msg
+        self.ukf_path_pub.publish(self.ukf_path)
+
+    
 
 
 def main():

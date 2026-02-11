@@ -60,6 +60,9 @@ class GaussianEKF(Node):
         self.alpha_v = 8.0
         self.alpha_w = 10.0
 
+        self.last_wheel_pos = None
+        self.last_wheel_t = None
+
         self.tf_broadcaster = TransformBroadcaster(self)
 
         
@@ -72,6 +75,7 @@ class GaussianEKF(Node):
 
    
     def joint_callback(self, msg: JointState):
+
         names = ["wheel_left_joint", "wheel_right_joint"]
         try:
             wl_i = msg.name.index(names[0])
@@ -79,16 +83,45 @@ class GaussianEKF(Node):
         except ValueError:
             return
 
-        wl = float(msg.velocity[wl_i])
-        wr = float(msg.velocity[wr_i])
+        t_now = self.get_clock().now().nanoseconds * 1e-9
+        wl_pos = float(msg.position[wl_i])
+        wr_pos = float(msg.position[wr_i])
+
+        if self.last_wheel_pos is None:
+            self.last_wheel_pos = (wl_pos, wr_pos)
+            self.last_wheel_t = t_now
+            return
+
+        dt = t_now - self.last_wheel_t
+        if dt <= 1e-6:
+            return
+
+        wl_prev, wr_prev = self.last_wheel_pos
+        wl = (wl_pos - wl_prev) / dt   # rad/s
+        wr = (wr_pos - wr_prev) / dt   # rad/s
+
+        self.last_wheel_pos = (wl_pos, wr_pos)
+        self.last_wheel_t = t_now
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
-        self.w_enc = (self.r / self.b) * (wl - wr)
-
-        self.z = np.array([[self.v_enc], [self.w_enc], [self.w_imu]], dtype=float)
+        self.w_enc = (self.r / self.b) * (wr - wl)
+        self.update_z_vector()
 
     def imu_callback(self, msg: Imu):
+        
         self.w_imu = float(msg.angular_velocity.z)
+       
+        if self.z is not None:
+             self.z[2, 0] = self.w_imu
+
+        self.update_z_vector()
+
+    def update_z_vector(self):
+        self.z = np.array([
+            [self.v_enc],
+            [self.w_enc],
+            [self.w_imu]
+        ], dtype=float)
 
     def cmd_callback(self, msg: TwistStamped):
         v_cmd = float(msg.twist.linear.x)
@@ -194,7 +227,7 @@ class GaussianEKF(Node):
         odom = Odometry()
         odom.header.stamp = current_time_msg
         odom.header.frame_id = "odom"
-        odom.child_frame_id = "base_link"
+        odom.child_frame_id = "base_footprint"
 
         odom.pose.pose.position.x = px
         odom.pose.pose.position.y = py
