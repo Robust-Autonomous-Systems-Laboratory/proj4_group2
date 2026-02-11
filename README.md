@@ -29,7 +29,7 @@ source install/setup.bash
 ```bash
 ros2 run  gaussian_filters {filter_node_name}
 ```
-# for filter node names
+### for filter node names
 
 - kf_node - *linear kalman filter*
 - ekf_node - *extended kalman filter*
@@ -56,3 +56,10 @@ ros2 bag play rosbag2_final/
 ```
 
 
+## Formulars used
+
+### Linear Kalman Filter
+![linear Kalman Filter](./images/formulas.webp)
+
+### Extended Kalman Filter
+![linear Kalman Filter](./images/ekf.webp)
