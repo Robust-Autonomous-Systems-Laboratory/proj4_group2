@@ -22,14 +22,11 @@ class GaussianKF(Node):
         self.kf_path.header.frame_id = "odom"
 
         
-        # State: x = [v, w]^T
-        
+        # State: x = [v, w]
         self.x = np.zeros((2, 1), dtype=float)
         self.P = np.eye(2, dtype=float) * 0.1
 
         # Process + measurement noise
-
-        # Q: uncertainty in how v,w evolve between steps
         self.Q = np.diag([0.07**2, 0.01**2]).astype(float)
 
         self.R = np.diag([0.03**2, 0.15**2, 0.001**2]).astype(float)

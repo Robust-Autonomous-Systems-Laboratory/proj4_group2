@@ -170,7 +170,7 @@ class GaussianUKF(Node):
         x = np.array(x).flatten()
         v = float(x[3])
         w = float(x[4])
-        return np.array([v, w, w], dtype=float)  # return 1D to match Z shape
+        return np.array([v, w, w], dtype=float)
 
    
     def sigma_points(self, mu: np.ndarray, P: np.ndarray) -> np.ndarray:
