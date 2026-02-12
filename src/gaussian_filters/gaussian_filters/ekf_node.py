@@ -40,12 +40,19 @@ class GaussianEKF(Node):
         self.x = np.zeros((5, 1), dtype=float)
         self.P = np.eye(5, dtype=float) * 0.1
 
-        # Process noise
-        # px, py, theta, v, w
-        self.Q = np.diag([0.01**2, 0.01**2, 0.02**2, 0.20**2, 0.30**2]).astype(float)
+        self.Q = np.diag([
+            0.001**2,  
+            0.001**2,
+            0.005**2,
+            0.10**2,
+            0.10**2    
+        ]).astype(float)
 
-        # Measrment noise for [v_enc, w_enc, w_imu]
-        self.R = np.diag([0.03**2, 0.08**2, 0.05**2]).astype(float)
+        self.R = np.diag([
+            0.03**2,   
+            0.15**2,   
+            0.01**2 
+        ]).astype(float)
 
         self.z = None
         self.u = np.zeros((2, 1), dtype=float)
@@ -93,19 +100,23 @@ class GaussianEKF(Node):
             return
 
         dt = t_now - self.last_wheel_t
-        if dt <= 1e-6:
+        if dt < 0.05:
             return
 
         wl_prev, wr_prev = self.last_wheel_pos
-        wl = (wl_pos - wl_prev) / dt   # rad/s
-        wr = (wr_pos - wr_prev) / dt   # rad/s
+        wl = (wl_pos - wl_prev) / dt   
+        wr = (wr_pos - wr_prev) / dt 
 
         self.last_wheel_pos = (wl_pos, wr_pos)
         self.last_wheel_t = t_now
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
+
+        self.w_enc = - self.w_enc
+
         self.update_z_vector()
+
 
     def imu_callback(self, msg: Imu):
         
@@ -155,8 +166,7 @@ class GaussianEKF(Node):
         F[4, 4] = 1.0 - self.alpha_w * dt
         return F
 
-    def h(self, x: np.ndarray) -> np.ndarray:
-       
+    def h(self, x):
         v = float(x[3, 0])
         w = float(x[4, 0])
         return np.array([[v], [w], [w]], dtype=float)

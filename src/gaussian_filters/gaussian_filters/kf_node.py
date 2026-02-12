@@ -30,9 +30,9 @@ class GaussianKF(Node):
         # Process + measurement noise
 
         # Q: uncertainty in how v,w evolve between steps
-        self.Q = np.diag([0.05**2, 0.10**2]).astype(float)
+        self.Q = np.diag([0.07**2, 0.01**2]).astype(float)
 
-        self.R = np.diag([0.03**2, 0.08**2, 0.05**2]).astype(float)
+        self.R = np.diag([0.03**2, 0.15**2, 0.001**2]).astype(float)
         self.H = np.array([
             [1.0, 0.0],
             [0.0, 1.0],
@@ -92,7 +92,7 @@ class GaussianKF(Node):
             return
 
         dt = t_now - self.last_wheel_t
-        if dt <= 1e-6:
+        if dt < 0.015:
             return
 
         wl_prev, wr_prev = self.last_wheel_pos
@@ -104,6 +104,8 @@ class GaussianKF(Node):
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
+
+        self.w_enc = - self.w_enc
 
         self.update_z_vector()
 

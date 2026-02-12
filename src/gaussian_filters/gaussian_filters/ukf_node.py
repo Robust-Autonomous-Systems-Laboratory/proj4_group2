@@ -36,9 +36,21 @@ class GaussianUKF(Node):
         self.P = np.eye(5, dtype=float) * 0.1
 
 
-        #I estimated these values but i can later tune them as i test th ecode 
-        self.Q = np.diag([0.01**2, 0.01**2, 0.02**2, 0.20**2, 0.30**2]).astype(float)
-        self.R = np.diag([0.03**2, 0.08**2, 0.05**2]).astype(float)
+        #I estimated these values but i can later tune them as i test th ecode
+
+        self.Q = np.diag([
+            0.001**2,  
+            0.001**2,
+            0.005**2,
+            0.10**2,
+            0.10**2    
+        ]).astype(float)
+
+        self.R = np.diag([
+            0.03**2,   
+            0.15**2,   
+            0.001**2 
+        ]).astype(float)
 
         self.z = None
         self.u = np.zeros((2, 1), dtype=float)
@@ -50,8 +62,8 @@ class GaussianUKF(Node):
         self.last_time = None
 
 
-        self.alpha_v = 8.0
-        self.alpha_w = 10.0
+        self.alpha_v = 5.0
+        self.alpha_w = 5.0
 
         self.n = 5
         self.alpha = 1e-3
@@ -79,7 +91,6 @@ class GaussianUKF(Node):
 
         self.odom_pub = self.create_publisher(Odometry, "/ukf_odom", 10)
         self.ukf_path_pub = self.create_publisher(Path, "ukf_path", 10)
-
         self.timer = self.create_timer(0.02, self.ukf_step)
 
    
@@ -102,7 +113,7 @@ class GaussianUKF(Node):
             return
 
         dt = t_now - self.last_wheel_t
-        if dt <= 1e-6:
+        if dt < 0.10:
             return
 
         wl_prev, wr_prev = self.last_wheel_pos
@@ -114,10 +125,11 @@ class GaussianUKF(Node):
 
         self.v_enc = (self.r / 2.0) * (wl + wr)
         self.w_enc = (self.r / self.b) * (wr - wl)
-
-        self.w_enc = - self.w_enc
+        
 
         self.update_z_vector()
+
+        self.w_enc = - self.w_enc
 
 
     def imu_callback(self, msg: Imu):
@@ -153,22 +165,17 @@ class GaussianUKF(Node):
 
         return np.array([px_new, py_new, th_new, v_new, w_new], dtype=float)
 
-    def h(self, x: np.ndarray) -> np.ndarray:
+    def h(self, x) -> np.ndarray:
+        
+        x = np.array(x).flatten()
         v = float(x[3])
         w = float(x[4])
-        return np.array([v, w, w], dtype=float)
+        return np.array([v, w, w], dtype=float)  # return 1D to match Z shape
 
    
     def sigma_points(self, mu: np.ndarray, P: np.ndarray) -> np.ndarray:
 
-        #This part i had help its not all completely my code
-
-
-        # numerical safety
         P = 0.5 * (P + P.T)
-
-        # Cholesky of (c * P)
-        # add tiny jitter if needed
         jitter = 1e-12
         for _ in range(5):
             try:
@@ -308,10 +315,7 @@ class GaussianUKF(Node):
 
         qx, qy, qz, qw = to_quaternion(theta)
 
-        odom.pose.pose.position.x = px
-        odom.pose.pose.position.y = py
-        odom.pose.pose.position.z = 0.0
-
+    
         odom.pose.pose.orientation.x = qx
         odom.pose.pose.orientation.y = qy
         odom.pose.pose.orientation.z = qz
@@ -321,8 +325,6 @@ class GaussianUKF(Node):
         odom.twist.twist.linear.x = v_f
         odom.twist.twist.angular.z = w_f
         self.odom_pub.publish(odom)
-
-
 
         pose = PoseStamped()
         pose.header.stamp = current_time_msg
